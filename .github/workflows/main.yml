@@ -1,0 +1,228 @@
+name: Build Native Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: دریافت فایل‌های پروژه
+        uses: actions/checkout@v4
+
+      - name: نصب جاوا 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: نصب Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: ساخت ساختار اندروید و کدهای جاوا
+        run: |
+          mkdir -p app/src/main/java/com/rv/changelte
+          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/res/drawable
+
+          # کپی کردن فایل‌های وب و عکس‌ها به داخل پوشه اندروید
+          cp index.html app/src/main/assets/
+          if [ -f "splash.jpg" ]; then cp splash.jpg app/src/main/assets/; fi
+          if [ -f "splash.png" ]; then cp splash.png app/src/main/assets/; fi
+          if [ -f "logo.png" ]; then cp logo.png app/src/main/assets/; fi
+          if [ -f "logo.jpg" ]; then cp logo.jpg app/src/main/assets/; fi
+
+          # تبدیل استاندارد لوگو به آیکون واقعی اندروید (512x512 PNG)
+          if [ -f "logo.png" ]; then
+            ffmpeg -y -i logo.png -vf "scale=512:512" app/src/main/res/drawable/ic_launcher.png
+          elif [ -f "logo.jpg" ]; then
+            ffmpeg -y -i logo.jpg -vf "scale=512:512" app/src/main/res/drawable/ic_launcher.png
+          fi
+
+          # ۱. ساخت settings.gradle
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "EngineeringRV"
+          include ':app'
+          EOF
+
+          # ۲. ساخت build.gradle اصلی
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          EOF
+
+          # ۳. ساخت app/build.gradle
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.rv.changelte'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.rv.changelte"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.debug
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          # ۴. ساخت AndroidManifest.xml
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <queries>
+                  <package android:name="com.android.phone" />
+                  <package android:name="com.android.settings" />
+              </queries>
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="Engineering R.V"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          # ۵. ساخت کد جاوا (MainActivity.java) برای باز کردن مستقیم منوی مخفی Phone Info
+          cat << 'EOF' > app/src/main/java/com/rv/changelte/MainActivity.java
+          package com.rv.changelte;
+
+          import android.app.Activity;
+          import android.content.ComponentName;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.view.Window;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  getWindow().setStatusBarColor(Color.parseColor("#001861"));
+                  getWindow().setNavigationBarColor(Color.parseColor("#00061a"));
+
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setAllowFileAccess(true);
+
+                  webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          if (url.startsWith("https://t.me/") || url.startsWith("tg://")) {
+                              try {
+                                  Intent tgIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                                  startActivity(tgIntent);
+                              } catch (Exception e) {
+                                  Toast.makeText(MainActivity.this, "برنامه تلگرام یافت نشد", Toast.LENGTH_SHORT).show();
+                              }
+                              return true;
+                          }
+                          return false;
+                      }
+                  });
+
+                  webView.loadUrl("file:///android_asset/index.html");
+              }
+
+              public class AndroidBridge {
+                  @JavascriptInterface
+                  public void openMenu(String method) {
+                      runOnUiThread(() -> {
+                          try {
+                              Intent intent = new Intent(Intent.ACTION_MAIN);
+                              if ("android11_plus".equals(method)) {
+                                  intent.setComponent(new ComponentName("com.android.phone", "com.android.phone.settings.RadioInfo"));
+                              } else {
+                                  intent.setComponent(new ComponentName("com.android.settings", "com.android.settings.RadioInfo"));
+                              }
+                              intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                              startActivity(intent);
+                          } catch (Exception e1) {
+                              // حالت پشتیبان اگر متد اول روی مدل خاصی جواب نداد
+                              try {
+                                  Intent fallback = new Intent(Intent.ACTION_MAIN);
+                                  if ("android11_plus".equals(method)) {
+                                      fallback.setClassName("com.android.settings", "com.android.settings.RadioInfo");
+                                  } else {
+                                      fallback.setClassName("com.android.phone", "com.android.phone.settings.RadioInfo");
+                                  }
+                                  startActivity(fallback);
+                              } catch (Exception e2) {
+                                  Toast.makeText(MainActivity.this, "منوی مخفی شبکه در این مدل گوشی مسدود شده است", Toast.LENGTH_LONG).show();
+                              }
+                          }
+                      });
+                  }
+              }
+          }
+          EOF
+
+      - name: کامپایل و ساخت فایل APK
+        run: gradle assembleRelease
+
+      - name: آپلود فایل APK نهایی برای دانلود
+        uses: actions/upload-artifact@v4
+        with:
+          name: Engineering-RV-LTE-APK
+          path: app/build/outputs/apk/release/app-release.apk
